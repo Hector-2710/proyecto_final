@@ -2,8 +2,8 @@ import pandas as pd
 from pymongo import MongoClient
 from neo4j import GraphDatabase
 # CONFIGURACIÓN Y CONEXIONES
-#  MongoDB 
-# 3333#
+#  MongoDB
+# 334343434 
 MONGO_URI = "mongodb://localhost:27017/"
 mongo_client = MongoClient(MONGO_URI)
 db_mongo = mongo_client["movies"]      
