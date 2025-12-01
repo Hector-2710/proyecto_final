@@ -1,229 +1,122 @@
 import pandas as pd
 from pymongo import MongoClient
 from neo4j import GraphDatabase
-# CONFIGURACIÓN Y CONEXIONES
-#  MongoDB
-# 334343434 
+import math
+
 MONGO_URI = "mongodb://localhost:27017/"
 mongo_client = MongoClient(MONGO_URI)
 db_mongo = mongo_client["movies"]      
 collection_movies = db_mongo["movies"]    
 
-#  Neo4j (
 NEO4J_URI = "bolt://localhost:7687"
-NEO4J_AUTH = ("neo4j", "password") 
+NEO4J_AUTH = ("neo4j", "password") # <--- CAMBIA TU CONTRASEÑA AQUÍ
 neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
 
-# FUNCIONES DE LIMPIEZA 
-def limpiar_crew(crew_string):
-    """
-    Transforma el string sucio de MongoDB en una lista estructurada.
-    """
-    if not crew_string or not isinstance(crew_string, str): 
-        return []
-    
-    parts = crew_string.split(', ')
-    actors_list = []
-    
-    for i in range(0, len(parts), 2):
-        if i+1 < len(parts):
-            actors_list.append({
-                "name": parts[i].strip(),
-                "role": parts[i+1].strip()
-            })
-    return actors_list
+CSV_PATH = "full_data.csv" 
+
 
 def limpiar_neo4j():
-    """Opcional: Borra Neo4j para evitar duplicados al re-correr el script"""
     print("🧹 Limpiando grafo antiguo en Neo4j...")
     with neo4j_driver.session() as session:
         session.run("MATCH (n) DETACH DELETE n")
     print("✅ Neo4j limpio.")
 
-# SINCRONIZACIÓN (MONGO -> NEO4J)
-def sincronizar_bases_de_datos():
-    CANTIDAD_LIMITE = 1000    
-    print(f"\n🚀 Iniciando sincronización (Limitado a {CANTIDAD_LIMITE} películas)...")
-
-    # EXTRAER: Pedimos los documentos a Mongo
-    cursor_mongo = collection_movies.find({}).limit(CANTIDAD_LIMITE)
-    
-    contador = 0
-    with neo4j_driver.session() as session:
-        for doc in cursor_mongo:
-            # TRANSFORMAR: Preparamos los datos para el grafo
-            # El _id de Mongo es un objeto ObjectId, lo pasamos a string
-            movie_id_str = str(doc["_id"]) 
-            title = doc.get("names", "Untitled")
-            
-            # Limpiamos el string de crew y genre que viene de Mongo
-            actors_data = limpiar_crew(doc.get("crew", ""))
-            genres_raw = doc.get("genre", "")
-            genres_list = genres_raw.split(", ") if genres_raw else []
-            
-            # CARGAR: Escribimos en Neo4j
-            cypher_query = """
-            MERGE (m:Movie {id: $mid})
-            SET m.title = $title
-            
-            // Relaciones de Género
-            WITH m
-            UNWIND $genres as g_name
-            MERGE (g:Genre {name: trim(g_name)})
-            MERGE (m)-[:BELONGS_TO]->(g)
-            
-            // Relaciones de Actores
-            WITH m
-            UNWIND $actors as actor
-            MERGE (p:Person {name: actor.name})
-            MERGE (p)-[:ACTED_IN {role: actor.role}]->(m)
-            """
-            
-            session.run(cypher_query, 
-                        mid=movie_id_str, 
-                        title=title, 
-                        genres=genres_list, 
-                        actors=actors_data)
-            
-            contador += 1
-            
-    print(f"✅ Sincronización completada. {contador} películas procesadas.")
-
-#  MÓDULO DE INTELIGENCIA DE NEGOCIO (3 Consultas)
-def ejecutar_analisis_avanzado():
-    print("\n" + "="*80)
-    print("🧠 MÓDULO DE INTELIGENCIA DE NEGOCIOS (RESULTADOS CRUZADOS)")
-    print("="*80)
-
-    # ---------------------------------------------------------
-    # CONSULTA 1: "Top Películas de Acción con Score Alto (>75)"
-    # Objetivo: Recomendación de calidad.
-    # ---------------------------------------------------------
-    print("\n1️⃣  RECOMENDACIÓN: Mejores películas del género 'Action'")
-    
-    # Paso A: Neo4j encuentra los candidatos (Filtro Temático)
-    target_genre = "Action"
-    q1_neo = """
-    MATCH (m:Movie)-[:BELONGS_TO]->(g:Genre {name: $genero})
-    RETURN m.id as id
+def crear_constraints():
     """
-    
-    with neo4j_driver.session() as session:
-        result = session.run(q1_neo, genero=target_genre)
-        candidate_ids = [record["id"] for record in result]
-    
-    # Paso B: MongoDB filtra por calidad (Filtro Cualitativo)
-    # Convertimos a ObjectId si es necesario, o string según tu base
-    from bson.objectid import ObjectId
-    try:
-        obj_ids = [ObjectId(i) for i in candidate_ids]
-    except:
-        obj_ids = candidate_ids
-
-    pipeline_q1 = [
-        {"$match": {
-            "_id": {"$in": obj_ids},
-            "score": {"$gte": 75} # Solo buenas películas
-        }},
-        {"$project": {"names": 1, "score": 1, "_id": 0}},
-        {"$sort": {"score": -1}},
-        {"$limit": 5}
+    Crea índices para que la carga sea rápida y no se dupliquen nodos.
+    """
+    print("🛡️ Creando índices y restricciones...")
+    queries = [
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Pelicula) REQUIRE p.titulo IS UNIQUE",
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (a:Persona) REQUIRE a.nombre IS UNIQUE",
+        "CREATE INDEX IF NOT EXISTS FOR (c:Ceremonia) ON (c.anio)",
+        "CREATE INDEX IF NOT EXISTS FOR (cat:Categoria) ON (cat.nombre)"
     ]
-    
-    top_movies = list(collection_movies.aggregate(pipeline_q1))
-    
-    print(f"   -> Encontramos {len(candidate_ids)} películas de '{target_genre}' en el Grafo.")
-    print("   -> Top 5 con mejor Rating en MongoDB:")
-    for m in top_movies:
-        print(f"      ★ {m['score']} - {m['names']}")
-
-    # CONSULTA 2: "Actores de Alto Presupuesto (Blockbuster Actors)"
-    # Objetivo: Identificar talento que maneja grandes presupuestos.
-    print("\n2️⃣  ACTORES BLOCKBUSTER: Participan en películas de > $100M")
-    
-    # Paso A: MongoDB encuentra el dinero (Filtro Financiero)
-    min_budget = 100000000
-    high_budget_movies = list(collection_movies.find(
-        {"budget_x": {"$gt": min_budget}},
-        {"_id": 1}
-    ))
-    
-    # Extraemos los IDs como strings para Neo4j
-    high_budget_ids = [str(doc["_id"]) for doc in high_budget_movies]
-    
-    # Paso B: Neo4j encuentra a las personas (Análisis de Red)
-    q2_neo = """
-    MATCH (p:Person)-[:ACTED_IN]->(m:Movie)
-    WHERE m.id IN $ids
-    RETURN p.name as actor, count(m) as total_blockbusters
-    ORDER BY total_blockbusters DESC
-    LIMIT 5
-    """
-    
-    print(f"   -> Películas de alto presupuesto encontradas: {len(high_budget_ids)}")
-    print("   -> Actores que más aparecen en ellas:")
-    
     with neo4j_driver.session() as session:
-        result = session.run(q2_neo, ids=high_budget_ids)
-        for record in result:
-            print(f"      🎬 {record['actor']} (aparece en {record['total_blockbusters']} blockbusters)")
+        for q in queries:
+            session.run(q)
+    print("✅ Índices creados.")
 
-    # ---------------------------------------------------------
-    # CONSULTA 3 (INVENTADA): "Rentabilidad Promedio por Género"
-    # Objetivo: Decisión estratégica de inversión.
-    # ---------------------------------------------------------
-    print("\n3️⃣  ESTRATEGIA (Inventada): ¿Qué género genera más dinero promedio?")
+def cargar_csv_a_neo4j(csv_path):
+    print(f"📂 Leyendo archivo CSV: {csv_path}...")
     
-    # Paso A: Neo4j agrupa IDs por Género
-    q3_neo = """
-    MATCH (m:Movie)-[:BELONGS_TO]->(g:Genre)
-    RETURN g.name as genero, collect(m.id) as movie_ids
+    try:
+        df = pd.read_csv(csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='utf-8')
+    except UnicodeDecodeError:
+        print("⚠️ Error de encoding. Intentando con 'latin-1'...")
+        df = pd.read_csv(csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='latin-1')
+    except Exception as e:
+        print(f"❌ Error crítico leyendo el CSV: {e}")
+        return
+
+    df = df.fillna("")
+    
+    print(f"✅ Archivo leído. Columnas detectadas: {list(df.columns)}")
+    print(f"📊 Total de filas a procesar: {len(df)}")
+
+    print("🚀 Iniciando carga de datos al Grafo...")
+    
+    query_cypher = """
+    MERGE (cer:Ceremonia {anio: toString($year)})
+    SET cer.numero = $ceremony_num
+
+    MERGE (cat:Categoria {nombre: $category})
+    SET cat.clase = $class_name
+    MERGE (cat)-[:PRESENTADA_EN]->(cer)
+
+    WITH cer, cat
+    WHERE $film IS NOT NULL AND toString($film) <> ""
+    MERGE (m:Pelicula {titulo: toString($film)})
+    MERGE (m)-[:NOMINADA_EN]->(cat)
+
+    WITH cer, cat, m
+    WHERE $name IS NOT NULL AND toString($name) <> ""
+    MERGE (p:Persona {nombre: toString($name)})
+    MERGE (p)-[:PARTICIPO_EN {rol_detalle: $detail}]->(m)
     """
-    
-    genre_revenue_data = []
-    
+
     with neo4j_driver.session() as session:
-        result = session.run(q3_neo)
+        count = 0
         
-        for record in result:
-            genre = record["genero"]
-            ids = record["movie_ids"]
-            
-            # Paso B: Mongo calcula el promedio de Revenue para esos IDs
+        for index, row in df.iterrows():
+            if not str(row.get('Film', '')).strip():
+                continue
             try:
-                # Conversión de IDs (Manejo de errores si son strings u ObjectIds)
-                valid_ids = []
-                for i in ids:
-                    try: valid_ids.append(ObjectId(i))
-                    except: valid_ids.append(i)
-
-                pipeline_q3 = [
-                    {"$match": {"_id": {"$in": valid_ids}, "revenue": {"$gt": 0}}}, # Ignoramos revenue 0
-                    {"$group": {"_id": None, "avg_rev": {"$avg": "$revenue"}}}
-                ]
+                params = {
+                    "year": str(row.get('Year', '')),
+                    "ceremony_num": row.get('Ceremony', 0), # Puede ser int
+                    "category": str(row.get('Category', '')).strip().upper(),
+                    "class_name": str(row.get('Class', 'General')), 
+                    "film": str(row.get('Film', '')).strip(),
+                    "name": str(row.get('Name', '')).strip(),
+                    "detail": str(row.get('Detail', ''))
+                }
                 
-                res = list(collection_movies.aggregate(pipeline_q3))
-                if res:
-                    avg_revenue = res[0]['avg_rev']
-                    genre_revenue_data.append((genre, avg_revenue))
+                session.run(query_cypher, params)
+                
+                count += 1
+                if count % 1000 == 0:
+                    print(f"   ... procesadas {count} filas.")
             except Exception as e:
-                pass # Ignorar errores puntuales de formato
+                print(f"⚠️ Error en fila {index}: {e}")
+                continue
 
-    # Ordenar y mostrar top 5
-    genre_revenue_data.sort(key=lambda x: x[1], reverse=True)
-    
-    print("   -> Ranking de Géneros por Ingreso Promedio:")
-    for i, (gen, rev) in enumerate(genre_revenue_data[:5], 1):
-        print(f"      {i}. {gen:<15} : ${rev:,.0f} (Promedio por película)")
+    print(f"✅ Carga finalizada. Total insertado en Neo4j: {count} registros.")
 
-# EJECUCIÓN
 if __name__ == "__main__":
     try:
-        limpiar_neo4j()             
-        sincronizar_bases_de_datos() 
-        ejecutar_analisis_avanzado() 
+        count_movies = collection_movies.count_documents({})
+        print(f"🟢 Conexión MongoDB exitosa. Películas en colección: {count_movies}")
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"🔴 Error conectando a MongoDB: {e}")
+
+    try:
+        limpiar_neo4j()      
+        crear_constraints()  
+        cargar_csv_a_neo4j(CSV_PATH)
+        
+    except Exception as e:
+        print(f"🔴 Error en Neo4j: {e}")
     finally:
         neo4j_driver.close()
         mongo_client.close()
