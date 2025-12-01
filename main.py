@@ -9,7 +9,7 @@ db_mongo = mongo_client["movies"]
 collection_movies = db_mongo["movies"]    
 
 NEO4J_URI = "bolt://localhost:7687"
-NEO4J_AUTH = ("neo4j", "password") # <--- CAMBIA TU CONTRASEÑA AQUÍ
+NEO4J_AUTH = ("neo4j", "CajaKun2710") # <--- CAMBIA TU CONTRASEÑA AQUÍ
 neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
 
 CSV_PATH = "full_data.csv" 
@@ -41,6 +41,7 @@ def cargar_csv_a_neo4j(csv_path):
     print(f"📂 Leyendo archivo CSV: {csv_path}...")
     
     try:
+        # Leemos el CSV detectando separador automáticamente
         df = pd.read_csv(csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='utf-8')
     except UnicodeDecodeError:
         print("⚠️ Error de encoding. Intentando con 'latin-1'...")
@@ -51,12 +52,11 @@ def cargar_csv_a_neo4j(csv_path):
 
     df = df.fillna("")
     
-    print(f"✅ Archivo leído. Columnas detectadas: {list(df.columns)}")
-    print(f"📊 Total de filas a procesar: {len(df)}")
-
-    print("🚀 Iniciando carga de datos al Grafo...")
+    print("🚀 Iniciando carga con relación [:GANO]...")
     
+    # --- CAMBIOS EN LA CONSULTA CYPHER ---
     query_cypher = """
+    // 1. Crear Nodos Base
     MERGE (cer:Ceremonia {anio: toString($year)})
     SET cer.numero = $ceremony_num
 
@@ -64,36 +64,50 @@ def cargar_csv_a_neo4j(csv_path):
     SET cat.clase = $class_name
     MERGE (cat)-[:PRESENTADA_EN]->(cer)
 
+    // 2. Crear Película
     WITH cer, cat
     WHERE $film IS NOT NULL AND toString($film) <> ""
     MERGE (m:Pelicula {titulo: toString($film)})
     MERGE (m)-[:NOMINADA_EN]->(cat)
 
+    // 3. Crear Persona y Relación de Participación
     WITH cer, cat, m
     WHERE $name IS NOT NULL AND toString($name) <> ""
     MERGE (p:Persona {nombre: toString($name)})
     MERGE (p)-[:PARTICIPO_EN {rol_detalle: $detail}]->(m)
+    
+    // 4. LÓGICA DE GANADOR (¡NUEVO!)
+    // Usamos FOREACH para simular un 'IF' en Cypher
+    // Si el parámetro $is_winner es True, se crea la relación
+    FOREACH (_ IN CASE WHEN $is_winner = true THEN [1] ELSE [] END |
+        MERGE (p)-[:GANO {anio: toString($year)}]->(cat)
+    )
     """
 
     with neo4j_driver.session() as session:
         count = 0
-        
         for index, row in df.iterrows():
             if not str(row.get('Film', '')).strip():
                 continue
+
+            # Detectar si ganó (Kaggle suele usar true/false o 1/0)
+            winner_val = row.get('winner', row.get('Winner', False))
+            # Convertimos a booleano de Python seguro
+            is_winner_bool = str(winner_val).lower() in ['true', '1', 'yes']
+
+            params = {
+                "year": str(row.get('Year', '')),
+                "ceremony_num": row.get('Ceremony', 0),
+                "category": str(row.get('Category', '')).strip().upper(),
+                "class_name": str(row.get('Class', 'General')), 
+                "film": str(row.get('Film', '')).strip(),
+                "name": str(row.get('Name', '')).strip(),
+                "detail": str(row.get('Detail', '')),
+                "is_winner": is_winner_bool  # <--- Pasamos el booleano aquí
+            }
+            
             try:
-                params = {
-                    "year": str(row.get('Year', '')),
-                    "ceremony_num": row.get('Ceremony', 0), # Puede ser int
-                    "category": str(row.get('Category', '')).strip().upper(),
-                    "class_name": str(row.get('Class', 'General')), 
-                    "film": str(row.get('Film', '')).strip(),
-                    "name": str(row.get('Name', '')).strip(),
-                    "detail": str(row.get('Detail', ''))
-                }
-                
                 session.run(query_cypher, params)
-                
                 count += 1
                 if count % 1000 == 0:
                     print(f"   ... procesadas {count} filas.")
@@ -101,7 +115,7 @@ def cargar_csv_a_neo4j(csv_path):
                 print(f"⚠️ Error en fila {index}: {e}")
                 continue
 
-    print(f"✅ Carga finalizada. Total insertado en Neo4j: {count} registros.")
+    print(f"✅ Carga finalizada. Total: {count} registros. Relaciones de GANADOR creadas.")
 
 if __name__ == "__main__":
     try:
