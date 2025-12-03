@@ -2,6 +2,7 @@ import pandas as pd
 from pymongo import MongoClient
 from neo4j import GraphDatabase
 import math
+import re
 
 MONGO_URI = "mongodb://localhost:27017/"
 mongo_client = MongoClient(MONGO_URI)
@@ -9,23 +10,17 @@ db_mongo = mongo_client["movies"]
 collection_movies = db_mongo["movies"]    
 
 NEO4J_URI = "bolt://localhost:7687"
-NEO4J_AUTH = ("neo4j", "password") # <--- CAMBIA TU CONTRASEÑA AQUÍ
+NEO4J_AUTH = ("neo4j", "password") 
 neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
 
 CSV_PATH = "full_data.csv" 
 
 
 def limpiar_neo4j():
-    print("🧹 Limpiando grafo antiguo en Neo4j...")
     with neo4j_driver.session() as session:
         session.run("MATCH (n) DETACH DELETE n")
-    print("✅ Neo4j limpio.")
 
 def crear_constraints():
-    """
-    Crea índices para que la carga sea rápida y no se dupliquen nodos.
-    """
-    print("🛡️ Creando índices y restricciones...")
     queries = [
         "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Pelicula) REQUIRE p.titulo IS UNIQUE",
         "CREATE CONSTRAINT IF NOT EXISTS FOR (a:Persona) REQUIRE a.nombre IS UNIQUE",
@@ -35,13 +30,9 @@ def crear_constraints():
     with neo4j_driver.session() as session:
         for q in queries:
             session.run(q)
-    print("✅ Índices creados.")
 
-def cargar_csv_a_neo4j(csv_path):
-    print(f"📂 Leyendo archivo CSV: {csv_path}...")
-    
+def cargar_csv_a_neo4j(csv_path):    
     try:
-        # Leemos el CSV detectando separador automáticamente
         df = pd.read_csv(csv_path, sep=None, engine='python', on_bad_lines='skip', encoding='utf-8')
     except UnicodeDecodeError:
         print("⚠️ Error de encoding. Intentando con 'latin-1'...")
@@ -50,13 +41,8 @@ def cargar_csv_a_neo4j(csv_path):
         print(f"❌ Error crítico leyendo el CSV: {e}")
         return
 
-    df = df.fillna("")
-    
-    print("🚀 Iniciando carga con relación [:GANO]...")
-    
-    # --- CAMBIOS EN LA CONSULTA CYPHER ---
+    df = df.fillna("")    
     query_cypher = """
-    // 1. Crear Nodos Base
     MERGE (cer:Ceremonia {anio: toString($year)})
     SET cer.numero = $ceremony_num
 
@@ -64,21 +50,16 @@ def cargar_csv_a_neo4j(csv_path):
     SET cat.clase = $class_name
     MERGE (cat)-[:PRESENTADA_EN]->(cer)
 
-    // 2. Crear Película
     WITH cer, cat
     WHERE $film IS NOT NULL AND toString($film) <> ""
     MERGE (m:Pelicula {titulo: toString($film)})
     MERGE (m)-[:NOMINADA_EN]->(cat)
 
-    // 3. Crear Persona y Relación de Participación
     WITH cer, cat, m
     WHERE $name IS NOT NULL AND toString($name) <> ""
     MERGE (p:Persona {nombre: toString($name)})
     MERGE (p)-[:PARTICIPO_EN {rol_detalle: $detail}]->(m)
     
-    // 4. LÓGICA DE GANADOR (¡NUEVO!)
-    // Usamos FOREACH para simular un 'IF' en Cypher
-    // Si el parámetro $is_winner es True, se crea la relación
     FOREACH (_ IN CASE WHEN $is_winner = true THEN [1] ELSE [] END |
         MERGE (p)-[:GANO {anio: toString($year)}]->(cat)
     )
@@ -89,10 +70,7 @@ def cargar_csv_a_neo4j(csv_path):
         for index, row in df.iterrows():
             if not str(row.get('Film', '')).strip():
                 continue
-
-            # Detectar si ganó (Kaggle suele usar true/false o 1/0)
             winner_val = row.get('winner', row.get('Winner', False))
-            # Convertimos a booleano de Python seguro
             is_winner_bool = str(winner_val).lower() in ['true', '1', 'yes']
 
             params = {
@@ -103,7 +81,7 @@ def cargar_csv_a_neo4j(csv_path):
                 "film": str(row.get('Film', '')).strip(),
                 "name": str(row.get('Name', '')).strip(),
                 "detail": str(row.get('Detail', '')),
-                "is_winner": is_winner_bool  # <--- Pasamos el booleano aquí
+                "is_winner": is_winner_bool  
             }
             
             try:
@@ -115,19 +93,48 @@ def cargar_csv_a_neo4j(csv_path):
                 print(f"⚠️ Error en fila {index}: {e}")
                 continue
 
-    print(f"✅ Carga finalizada. Total: {count} registros. Relaciones de GANADOR creadas.")
+def analizar_rentabilidad_best_picture():
+    with neo4j_driver.session() as session:
+        query = """
+        MATCH (m:Pelicula)-[:NOMINADA_EN]->(cat:Categoria)
+        WHERE cat.nombre = "BEST PICTURE"
+        RETURN m.titulo AS titulo
+        """
+        result = session.run(query)
+        titulos = [r["titulo"] for r in result]
+
+    reporte = []
+
+    for title in titulos:
+        movie = collection_movies.find_one({"names": title})
+
+        if not movie:
+            continue
+
+        budget = movie.get("budget_x", 0) or 0
+        revenue = movie.get("revenue", 0) or 0
+        profit = revenue - budget
+        rentable = profit > 0
+
+        reporte.append((title, budget, revenue, profit, rentable))
+
+    print("\n📊 RESULTADO DE RENTABILIDAD:")
+    for title, budget, revenue, profit, rentable in reporte:
+        print(f"🎬 {title} | Budget: {budget:,} | Revenue: {revenue:,} | "
+              f"Profit: {profit:,} | Rentable: {rentable}")
 
 if __name__ == "__main__":
     try:
         count_movies = collection_movies.count_documents({})
-        print(f"🟢 Conexión MongoDB exitosa. Películas en colección: {count_movies}")
+        print(f"🟢 Conexión MongoDB exitosa")
     except Exception as e:
         print(f"🔴 Error conectando a MongoDB: {e}")
 
     try:
-        limpiar_neo4j()      
-        crear_constraints()  
-        cargar_csv_a_neo4j(CSV_PATH)
+        # limpiar_neo4j()      
+        # crear_constraints()  
+        # cargar_csv_a_neo4j(CSV_PATH)
+        analizar_rentabilidad_best_picture()
         
     except Exception as e:
         print(f"🔴 Error en Neo4j: {e}")
