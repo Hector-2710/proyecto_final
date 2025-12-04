@@ -8,7 +8,7 @@ db_mongo = mongo_client["movies"]
 collection_movies = db_mongo["movies"]    
 
 NEO4J_URI = "bolt://localhost:7687"
-NEO4J_AUTH = ("neo4j", "pass") 
+NEO4J_AUTH = ("neo4j", "CajaKun2710") 
 neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
 
 CSV_PATH = "full_data.csv" 
@@ -141,6 +141,43 @@ def encontrar_blockbusters_ignorados():
     for p in sorted(candidatas, key=lambda x: x['profit'], reverse=True)[:10]:
         print(f"{str(p['titulo'])[:38]:<40} | ${p['profit']:<14,.0f} | ${p['revenue']:,.0f}")
 
+def analizar_actores_rentables():    
+    query = """ MATCH (p:Persona)-[:PARTICIPO_EN]->(m:Pelicula)-[:NOMINADA_EN]->(c:Categoria)
+    WHERE c.nombre IN ["ACTOR IN A LEADING ROLE", "ACTRESS IN A LEADING ROLE"]
+    WITH p, collect(DISTINCT m.titulo) as pelis, count(DISTINCT m) as num_peliculas_premiadas
+    WHERE num_peliculas_premiadas >= 3 
+    RETURN p.nombre as actor, pelis
+    """
+    
+    actor_data = []
+    with neo4j_driver.session() as s:
+        for r in s.run(query):
+            pelis_clean = [str(x).strip().lower() for x in r["pelis"]]
+            actor_data.append((str(r["actor"]), pelis_clean))
+
+    mongo_revs = {}
+    to_float = lambda x: float(str(x).replace("$", "").replace(",", "")) if x else 0.0
+    cursor = collection_movies.find({}, {"names": 1, "revenue": 1})
+    for doc in cursor:
+        mongo_revs[str(doc.get("names", "")).strip().lower()] = to_float(doc.get("revenue"))
+
+    ranking = []
+    for actor, pelis in actor_data:
+        total_rev = 0
+        hits = 0
+        for p in pelis:
+            if p in mongo_revs:
+                total_rev += mongo_revs[p]
+                hits += 1
+        
+        if hits > 0:
+            ranking.append((actor, total_rev, hits))
+
+    print(f"{'ACTOR/ACTRIZ':<25} | {'PELÍCULAS CRUZADAS':<18} | {'REVENUE TOTAL GENERADO'}")
+    print("-" * 75)
+    for name, rev, count in sorted(ranking, key=lambda x: x[1], reverse=True)[:10]:
+        print(f"{name[:24]:<25} | {count:<18} | ${rev:,.0f}")
+
 
 if __name__ == "__main__":
     try:
@@ -154,7 +191,8 @@ if __name__ == "__main__":
         # crear_constraints()  
         # cargar_csv_a_neo4j(CSV_PATH)
         # analizar_rentabilidad_best_picture()
-        encontrar_blockbusters_ignorados()
+        # encontrar_blockbusters_ignorados()
+        analizar_actores_rentables()
         
     except Exception as e:
         print(f"🔴 Error en Neo4j: {e}")
