@@ -1,8 +1,6 @@
 import pandas as pd
 from pymongo import MongoClient
 from neo4j import GraphDatabase
-import math
-import re
 
 MONGO_URI = "mongodb://localhost:27017/"
 mongo_client = MongoClient(MONGO_URI)
@@ -10,11 +8,10 @@ db_mongo = mongo_client["movies"]
 collection_movies = db_mongo["movies"]    
 
 NEO4J_URI = "bolt://localhost:7687"
-NEO4J_AUTH = ("neo4j", "password") 
+NEO4J_AUTH = ("neo4j", "pass") 
 neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
 
 CSV_PATH = "full_data.csv" 
-
 
 def limpiar_neo4j():
     with neo4j_driver.session() as session:
@@ -123,6 +120,28 @@ def analizar_rentabilidad_best_picture():
         print(f"🎬 {title} | Budget: {budget:,} | Revenue: {revenue:,} | "
               f"Profit: {profit:,} | Rentable: {rentable}")
 
+def encontrar_blockbusters_ignorados():
+    with neo4j_driver.session() as s:
+        nominadas = {str(r["titulo"]).strip().lower() for r in s.run("MATCH (m:Pelicula) RETURN m.titulo AS titulo")}
+
+    to_float = lambda x: float(str(x).replace("$", "").replace(",", "")) if x else 0.0
+    candidatas = []
+
+    cursor = collection_movies.find({}, {"names": 1, "budget_x": 1, "revenue": 1})
+    
+    for doc in cursor:
+        rev, bud = to_float(doc.get("revenue")), to_float(doc.get("budget_x"))
+        profit = rev - bud
+        
+        if profit > 100_000_000 and str(doc.get("names")).strip().lower() not in nominadas:
+            candidatas.append({"titulo": doc.get("names"), "profit": profit, "revenue": rev})
+
+    print(f"{'PELÍCULA':<40} | {'PROFIT':<15} | {'REVENUE'}")
+    print("-" * 75)
+    for p in sorted(candidatas, key=lambda x: x['profit'], reverse=True)[:10]:
+        print(f"{str(p['titulo'])[:38]:<40} | ${p['profit']:<14,.0f} | ${p['revenue']:,.0f}")
+
+
 if __name__ == "__main__":
     try:
         count_movies = collection_movies.count_documents({})
@@ -134,7 +153,8 @@ if __name__ == "__main__":
         # limpiar_neo4j()      
         # crear_constraints()  
         # cargar_csv_a_neo4j(CSV_PATH)
-        analizar_rentabilidad_best_picture()
+        # analizar_rentabilidad_best_picture()
+        encontrar_blockbusters_ignorados()
         
     except Exception as e:
         print(f"🔴 Error en Neo4j: {e}")
