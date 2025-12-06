@@ -1,6 +1,8 @@
 import pandas as pd
+import re
 from pymongo import MongoClient
 from neo4j import GraphDatabase
+from datetime import datetime
 
 MONGO_URI = "mongodb://localhost:27017/"
 mongo_client = MongoClient(MONGO_URI)
@@ -180,18 +182,12 @@ def analizar_actores_rentables():
 
 def consulta_generos_favoritos():
     
-    # 1. Neo4j: Obtener lista de todas las películas nominadas (sin repetir)
-    # Usamos collect para traerlas a Python
     with neo4j_driver.session() as s:
         result = s.run("MATCH (m:Pelicula) RETURN m.titulo AS titulo")
         titulos_nominados = [str(r["titulo"]).strip().lower() for r in result]
 
-    # 2. MongoDB: Filtrar esas películas y extraer sus géneros
-    # Usamos $in para buscar solo las que están en la lista de Neo4j
     pipeline = [
         {
-            # Truco: Buscamos coincidencias aproximadas (case insensitive) si es posible, 
-            # pero para hacerlo rápido en Python filtramos primero.
             "$match": {"revenue": {"$exists": True}} 
         },
         {"$project": {"names": 1, "genre": 1, "_id": 0}}
@@ -204,28 +200,77 @@ def consulta_generos_favoritos():
     for doc in cursor:
         nombre_mongo = str(doc.get("names", "")).strip().lower()
         
-        # EL CRUCE: Si el nombre de Mongo está en la lista de Neo4j
         if nombre_mongo in titulos_nominados:
             generos_str = doc.get("genre", "")
             if generos_str:
-                # Limpieza: "Action, Drama, Sci-Fi" -> ["Action", "Drama", "Sci-Fi"]
                 lista_generos = [g.strip() for g in generos_str.split(',')]
                 for genero in lista_generos:
                     conteo_generos[genero] = conteo_generos.get(genero, 0) + 1
 
-    # 3. Mostrar Resultados (Top 5)
     print(f"{'GÉNERO':<20} | {'CANTIDAD DE PELÍCULAS NOMINADAS'}")
     print("-" * 60)
     
-    # Ordenamos de mayor a menor
     top_generos = sorted(conteo_generos.items(), key=lambda x: x[1], reverse=True)[:10]
     
     for genero, cantidad in top_generos:
         print(f"{genero:<20} | {cantidad}")
 
-    # Retornamos para usar el dato en conclusiones si quieres
     return top_generos
 
+def normalizar_titulo(texto):
+    if not texto: return ""
+    return re.sub(r'[^a-z0-9]', '', str(texto).lower())
+
+def analizar_estacionalidad_estrenos():
+    print("\n📅 ANALIZANDO ESTACIONALIDAD (¿Cuándo estrenar para ganar?)...")
+    
+    query_neo = """
+    MATCH (m:Pelicula)-[:NOMINADA_EN]->(:Categoria)
+    RETURN DISTINCT m.titulo as titulo
+    """
+    
+    peliculas_nominadas = set()
+    with neo4j_driver.session() as session:
+        result = session.run(query_neo)
+        for record in result:
+            peliculas_nominadas.add(normalizar_titulo(record["titulo"]))
+    
+    print(f"   -> Películas nominadas cargadas: {len(peliculas_nominadas)}")
+
+    meses_conteo = {i: 0 for i in range(1, 13)}
+    matches = 0
+    
+    cursor = collection_movies.find({}, {"names": 1, "date_x": 1})
+    
+    for doc in cursor:
+        try:
+            nombre = normalizar_titulo(doc.get("names", ""))
+            fecha_str = doc.get("date_x", "").strip()
+            
+            if nombre in peliculas_nominadas and fecha_str:
+                dt = datetime.strptime(fecha_str, "%m/%d/%Y")
+                meses_conteo[dt.month] += 1
+                matches += 1
+        except:
+            continue
+
+    nombres_meses = [
+        "", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+        "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+    ]
+    
+    print(f"   -> Se logró determinar la fecha de estreno de {matches} películas nominadas.\n")
+    
+    print(f"{'MES DE ESTRENO':<15} | {'CANTIDAD NOMINACIONES':<22} | {'% DEL TOTAL'}")
+    print("-" * 60)
+    
+    for mes_num in range(1, 13):
+        cantidad = meses_conteo[mes_num]
+        porcentaje = (cantidad / matches * 100) if matches > 0 else 0
+        print(f"{nombres_meses[mes_num]:<15} | {cantidad:<22} | {porcentaje:5.1f}%")
+
+    q4 = meses_conteo[10] + meses_conteo[11] + meses_conteo[12]
+    print(f"\n💡 DATO CLAVE: El {q4/matches*100:.1f}% de las nominadas se estrenaron en el último trimestre (Oct-Dic).")
 
 if __name__ == "__main__":
     try:
@@ -242,6 +287,7 @@ if __name__ == "__main__":
         # encontrar_blockbusters_ignorados()
         #analizar_actores_rentables()
         consulta_generos_favoritos()
+        analizar_estacionalidad_estrenos()
     except Exception as e:
         print(f"🔴 Error en Neo4j: {e}")
     finally:
