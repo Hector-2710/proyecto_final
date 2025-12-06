@@ -8,7 +8,7 @@ db_mongo = mongo_client["movies"]
 collection_movies = db_mongo["movies"]    
 
 NEO4J_URI = "bolt://localhost:7687"
-NEO4J_AUTH = ("neo4j", "CajaKun2710") 
+NEO4J_AUTH = ("neo4j", "neo4j123") 
 neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
 
 CSV_PATH = "full_data.csv" 
@@ -178,6 +178,54 @@ def analizar_actores_rentables():
     for name, rev, count in sorted(ranking, key=lambda x: x[1], reverse=True)[:10]:
         print(f"{name[:24]:<25} | {count:<18} | ${rev:,.0f}")
 
+def consulta_generos_favoritos():
+    
+    # 1. Neo4j: Obtener lista de todas las películas nominadas (sin repetir)
+    # Usamos collect para traerlas a Python
+    with neo4j_driver.session() as s:
+        result = s.run("MATCH (m:Pelicula) RETURN m.titulo AS titulo")
+        titulos_nominados = [str(r["titulo"]).strip().lower() for r in result]
+
+    # 2. MongoDB: Filtrar esas películas y extraer sus géneros
+    # Usamos $in para buscar solo las que están en la lista de Neo4j
+    pipeline = [
+        {
+            # Truco: Buscamos coincidencias aproximadas (case insensitive) si es posible, 
+            # pero para hacerlo rápido en Python filtramos primero.
+            "$match": {"revenue": {"$exists": True}} 
+        },
+        {"$project": {"names": 1, "genre": 1, "_id": 0}}
+    ]
+    
+    cursor = collection_movies.aggregate(pipeline)
+    
+    conteo_generos = {}
+    
+    for doc in cursor:
+        nombre_mongo = str(doc.get("names", "")).strip().lower()
+        
+        # EL CRUCE: Si el nombre de Mongo está en la lista de Neo4j
+        if nombre_mongo in titulos_nominados:
+            generos_str = doc.get("genre", "")
+            if generos_str:
+                # Limpieza: "Action, Drama, Sci-Fi" -> ["Action", "Drama", "Sci-Fi"]
+                lista_generos = [g.strip() for g in generos_str.split(',')]
+                for genero in lista_generos:
+                    conteo_generos[genero] = conteo_generos.get(genero, 0) + 1
+
+    # 3. Mostrar Resultados (Top 5)
+    print(f"{'GÉNERO':<20} | {'CANTIDAD DE PELÍCULAS NOMINADAS'}")
+    print("-" * 60)
+    
+    # Ordenamos de mayor a menor
+    top_generos = sorted(conteo_generos.items(), key=lambda x: x[1], reverse=True)[:10]
+    
+    for genero, cantidad in top_generos:
+        print(f"{genero:<20} | {cantidad}")
+
+    # Retornamos para usar el dato en conclusiones si quieres
+    return top_generos
+
 
 if __name__ == "__main__":
     try:
@@ -192,8 +240,8 @@ if __name__ == "__main__":
         # cargar_csv_a_neo4j(CSV_PATH)
         # analizar_rentabilidad_best_picture()
         # encontrar_blockbusters_ignorados()
-        analizar_actores_rentables()
-        
+        #analizar_actores_rentables()
+        consulta_generos_favoritos()
     except Exception as e:
         print(f"🔴 Error en Neo4j: {e}")
     finally:
