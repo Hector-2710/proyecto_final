@@ -10,7 +10,7 @@ db_mongo = mongo_client["movies"]
 collection_movies = db_mongo["movies"]    
 
 NEO4J_URI = "bolt://localhost:7687"
-NEO4J_AUTH = ("neo4j", "neo4j123") 
+NEO4J_AUTH = ("neo4j", "CajaKun2710") 
 neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
 
 CSV_PATH = "full_data.csv" 
@@ -101,6 +101,7 @@ def analizar_rentabilidad_best_picture():
         """
         result = session.run(query)
         titulos = [r["titulo"] for r in result]
+        print(f"\n🎥 Películas nominadas a BEST PICTURE encontradas: {len(titulos)}")
 
     reporte = []
 
@@ -183,7 +184,7 @@ def analizar_actores_rentables():
 def consulta_generos_favoritos():
     
     with neo4j_driver.session() as s:
-        result = s.run("MATCH (m:Pelicula) RETURN m.titulo AS titulo")
+        result = s.run("MATCH (m:Pelicula)-[N:NOMINADA_EN]->(:Categoria) RETURN m.titulo AS titulo")
         titulos_nominados = [str(r["titulo"]).strip().lower() for r in result]
 
     pipeline = [
@@ -272,6 +273,61 @@ def analizar_estacionalidad_estrenos():
     q4 = meses_conteo[10] + meses_conteo[11] + meses_conteo[12]
     print(f"\n💡 DATO CLAVE: El {q4/matches*100:.1f}% de las nominadas se estrenaron en el último trimestre (Oct-Dic).")
 
+def analizar_duplas_exitosas(min_colaboraciones=3):
+    cypher_query = """
+    MATCH (p1:Persona)-[:PARTICIPO_EN]->(m:Pelicula)<-[:PARTICIPO_EN]-(p2:Persona) WHERE elementId(p1) < elementId(p2) 
+    WITH p1, p2, collect(m.titulo) AS titulos, count(m) AS num_pelis WHERE num_pelis >= $min_colabs
+    RETURN p1.nombre AS persona1, p2.nombre AS persona2, titulos, num_pelis ORDER BY num_pelis DESC LIMIT 10
+    """
+
+    resultados_finales = []
+    with neo4j_driver.session() as session:
+        result = session.run(cypher_query, min_colabs=min_colaboraciones)
+        for record in result:
+            p1 = record["persona1"]
+            p2 = record["persona2"]
+            lista_peliculas = record["titulos"] 
+            num_pelis = record["num_pelis"]
+            
+            pipeline = [
+                {"$match": {"names": {"$in": lista_peliculas}}},
+                {"$group": {
+                    "_id": None, 
+                    "total_revenue": {"$sum": "$revenue"},
+                    "avg_revenue": {"$avg": "$revenue"}}}]
+            
+            mongo_result = list(collection_movies.aggregate(pipeline))
+            
+            if mongo_result:
+                revenue_total = mongo_result[0].get('total_revenue', 0) or 0
+                revenue_promedio = mongo_result[0].get('avg_revenue', 0) or 0
+            else:
+                revenue_total = 0
+                revenue_promedio = 0
+            
+            resultados_finales.append({
+                "Dupla": f"{p1} & {p2}",
+                "Colaboraciones": num_pelis,
+                "Ejemplos": ", ".join(lista_peliculas[:2]), 
+                "Total Revenue": revenue_total,
+                "Promedio x Peli": revenue_promedio
+            })
+
+    if not resultados_finales:
+        print("⚠️ No se encontraron duplas con ese criterio.")
+        return
+
+    df = pd.DataFrame(resultados_finales)
+    
+    print(f"{'DUPLA':<40} | {'COLABS':<6} | {'PROMEDIO X PELI':<15} | {'EJEMPLOS'}")
+    print("-" * 100)
+    
+    df_sorted = df.sort_values(by="Promedio x Peli", ascending=False)
+    
+    for _, row in df_sorted.iterrows():
+        rev_fmt = f"${row['Promedio x Peli']:,.0f}"
+        print(f"{row['Dupla'][:38]:<40} | {row['Colaboraciones']:<6} | {rev_fmt:<15} | {row['Ejemplos']}")
+
 if __name__ == "__main__":
     try:
         count_movies = collection_movies.count_documents({})
@@ -285,9 +341,10 @@ if __name__ == "__main__":
         # cargar_csv_a_neo4j(CSV_PATH)
         # analizar_rentabilidad_best_picture()
         # encontrar_blockbusters_ignorados()
-        #analizar_actores_rentables()
+        # analizar_actores_rentables()
         consulta_generos_favoritos()
-        analizar_estacionalidad_estrenos()
+        # analizar_estacionalidad_estrenos()
+        analizar_duplas_exitosas()
     except Exception as e:
         print(f"🔴 Error en Neo4j: {e}")
     finally:
