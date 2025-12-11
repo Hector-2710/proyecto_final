@@ -3,6 +3,7 @@ import re
 from pymongo import MongoClient
 from neo4j import GraphDatabase
 from datetime import datetime
+from collections import Counter  
 
 MONGO_URI = "mongodb://localhost:27017/"
 mongo_client = MongoClient(MONGO_URI)
@@ -222,55 +223,64 @@ def normalizar_titulo(texto):
     return re.sub(r'[^a-z0-9]', '', str(texto).lower())
 
 def analizar_estacionalidad_estrenos():
-    print("\n📅 ANALIZANDO ESTACIONALIDAD (¿Cuándo estrenar para ganar?)...")
-    
     query_neo = """
-    MATCH (m:Pelicula)-[:NOMINADA_EN]->(:Categoria)
-    RETURN DISTINCT m.titulo as titulo
+    MATCH (m:Pelicula)-[:NOMINADA_EN]->(cat:Categoria)-[:PRESENTADA_EN]->(c:Ceremonia)
+    RETURN DISTINCT m.titulo as titulo, c.anio as anio_ceremonia
     """
-    
-    peliculas_nominadas = set()
+    peliculas_validas = {}
     with neo4j_driver.session() as session:
         result = session.run(query_neo)
         for record in result:
-            peliculas_nominadas.add(normalizar_titulo(record["titulo"]))
-    
-    print(f"   -> Películas nominadas cargadas: {len(peliculas_nominadas)}")
-
-    meses_conteo = {i: 0 for i in range(1, 13)}
+            titulo_norm = normalizar_titulo(record["titulo"])
+            try:
+                peliculas_validas[titulo_norm] = int(record["anio_ceremonia"])
+            except:
+                continue
+    datos_meses = {i: {'total': 0, 'ceremonias': []} for i in range(1, 13)}
     matches = 0
-    
     cursor = collection_movies.find({}, {"names": 1, "date_x": 1})
-    
     for doc in cursor:
         try:
             nombre = normalizar_titulo(doc.get("names", ""))
             fecha_str = doc.get("date_x", "").strip()
             
-            if nombre in peliculas_nominadas and fecha_str:
+            if nombre in peliculas_validas and fecha_str:
                 dt = datetime.strptime(fecha_str, "%m/%d/%Y")
-                meses_conteo[dt.month] += 1
+                mes_idx = dt.month
+                anio_ceremonia = peliculas_validas[nombre]
+                datos_meses[mes_idx]['total'] += 1
+                datos_meses[mes_idx]['ceremonias'].append(anio_ceremonia)
                 matches += 1
         except:
             continue
-
-    nombres_meses = [
-        "", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-        "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
-    ]
+    nombres_meses = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+                     "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
     
-    print(f"   -> Se logró determinar la fecha de estreno de {matches} películas nominadas.\n")
-    
-    print(f"{'MES DE ESTRENO':<15} | {'CANTIDAD NOMINACIONES':<22} | {'% DEL TOTAL'}")
-    print("-" * 60)
+    print(f"   -> Datos cruzados: {matches} películas.")
+    print("\nDISTRIBUCIÓN MENSUAL Y AÑOS PREDOMINANTES")
+    print(f"{'MES':<12} | {'CANT.':<5} | {'%':<5} | {'GRÁFICO':<12} | {'CEREMONIAS (AÑOS) QUE MÁS APORTAN'}")
+    print("-" * 100)
     
     for mes_num in range(1, 13):
-        cantidad = meses_conteo[mes_num]
-        porcentaje = (cantidad / matches * 100) if matches > 0 else 0
-        print(f"{nombres_meses[mes_num]:<15} | {cantidad:<22} | {porcentaje:5.1f}%")
+        data = datos_meses[mes_num]
+        total = data['total']
+        lista_ceremonias = data['ceremonias']
+        
+        porcentaje = (total / matches * 100) if matches > 0 else 0
+        barra = "█" * int(porcentaje / 2)
+        
+        if total > 0:
+            conteo_anios = Counter(lista_ceremonias)
+            top_3 = conteo_anios.most_common(3) 
+            texto_top = ", ".join([f"{anio} ({cnt})" for anio, cnt in top_3])
+        else:
+            texto_top = "-"
 
-    q4 = meses_conteo[10] + meses_conteo[11] + meses_conteo[12]
-    print(f"\n💡 DATO CLAVE: El {q4/matches*100:.1f}% de las nominadas se estrenaron en el último trimestre (Oct-Dic).")
+        print(f"{nombres_meses[mes_num]:<12} | {total:<5} | {porcentaje:4.1f}% | {barra:<12} | {texto_top}")
+
+    print("\n💡 INTERPRETACIÓN: La columna derecha muestra qué ceremonias (años)")
+    print("   concentraron sus estrenos en ese mes. Ej: '2024 (15)' significa que")
+    print("   para la ceremonia de 2024, 15 nominadas se estrenaron en ese mes.")
 
 if __name__ == "__main__":
     try:
@@ -286,7 +296,7 @@ if __name__ == "__main__":
         # analizar_rentabilidad_best_picture()
         # encontrar_blockbusters_ignorados()
         #analizar_actores_rentables()
-        consulta_generos_favoritos()
+        #consulta_generos_favoritos()
         analizar_estacionalidad_estrenos()
     except Exception as e:
         print(f"🔴 Error en Neo4j: {e}")
